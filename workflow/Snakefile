@@ -25,14 +25,12 @@ rule download_dataset_summary:
     log: "logs/download_genome_summary.log"
     shell:
         """
-        CMD="datasets summary genome taxon \
+        datasets summary genome taxon {params.taxids} \
         --assembly-level {params.level} \
         --exclude-atypical --assembly-version latest \
         --assembly-source RefSeq --mag exclude --exclude-multi-isolate \
-        --report sequence {params.taxids}"
-        echo "COMMAND: $CMD" > {log}
-        $CMD > {output}  >>2 {log}
-        echo "COMMAND EXIT CODE: $?" >> {log}
+        --report sequence > {output} 2> {log}
+        
         """
 
 rule parse_dataset_summary:
