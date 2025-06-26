@@ -1,0 +1,22 @@
+taxids:
+  - 2     # Bacteria
+
+    
+parse:
+  min_tax_level: species
+
+
+filter:
+  max_tax_level: species
+  max_per_taxon: 100
+  min_assembly_level: contig
+
+
+rehydrate:
+  max_workers: 10
+
+
+db:
+  chunk_size_db: 10
+  sample_interval: 64
+  sa_sample: 32

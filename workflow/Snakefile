@@ -1,0 +1,169 @@
+import glob
+from pathlib import Path
+# conda activate gene_db
+
+configfile: "config/config.yaml"
+TAXIDS = config["taxids"]
+
+
+rule all:
+    input:
+        expand(
+            "data/genomes/db/index/{chunk}.mtsv",
+            chunk=lambda wildcards: [Path(f).name for f in get_chunks(wildcards)])
+
+
+
+rule download_dataset_summary:
+    """
+    Download json data from NCBI using the datasets command line tool.
+    """
+    output: "data/genomes/accessions.json"
+    params:
+        level = "complete,chromosome,contig,scaffold",
+        taxids = config["taxids"]
+    log: "logs/download_genome_summary.log"
+    shell:
+        """
+        CMD="datasets summary genome taxon \
+        --assembly-level {params.level} \
+        --exclude-atypical --assembly-version latest \
+        --assembly-source RefSeq --mag exclude --exclude-multi-isolate \
+        --report sequence {params.taxids}"
+        echo "COMMAND: $CMD" > {log}
+        $CMD > {output}  >>2 {log}
+        echo "COMMAND EXIT CODE: $?" >> {log}
+        """
+
+rule parse_dataset_summary:
+    """
+    Parse the downloaded dataset summary file to extract accessions, taxid, and assembly level.
+    """
+    input:
+        json = "data/genomes/accessions.json"
+    output: 
+        accessions = "data/genomes/accessions.tsv",
+        counts = "data/genomes/accession-count-per-taxa.tsv"
+    params:
+        min_tax_level = config["parse"]["min_tax_level"]
+    log: "logs/parse_dataset_summary.log"
+    script:
+        "scripts/parse_dataset_summary.py"
+
+
+rule filter_accessions:
+    """
+    Filter the accessions to only include a maximum number per taxon.
+    """
+    input:
+        accessions = "data/genomes/accessions.tsv"
+    output:
+        filtered_accessions = "data/genomes/accessions-filtered.tsv"
+    params:
+        max_tax_level = config.get("filter", {}).get("max_tax_level", "species"),
+        max_per_taxon = config.get("filter", {}).get("max_per_taxon", 20),
+        min_asm_level = config.get("filter", {}).get("min_assembly_level", None)
+    log: "logs/filter_accessions.log"
+    script:
+        "scripts/filter_accessions.py"
+
+
+rule download_genome_zip:
+    """
+    Download dehydrated genome ZIP file from NCBI for a given taxid.
+    """
+    input:
+        accessions = "data/genomes/accessions-filtered.tsv"
+    output:
+        zipfile = "data/genomes/ncbi_dataset.zip"
+    log:
+        "logs/download_genomes_dehydrated.log"
+    shell:
+        """
+        datasets download genome taxon {wildcards.taxid} \
+            --inputfile {input.accessions} \
+            --filename {output.zipfile} \
+            --no-progressbar \
+            --dehydrated \
+            > {log} 2>&1
+        """
+
+
+rule rehydrate_genome_zip:
+    """
+    Unzip and rehydrate dehydrated genome files into a directory.
+    """
+    input:
+        zipfile = "data/genomes/ncbi_dataset.zip"
+    output:
+        flag = touch("data/genomes/.hydrated")
+    params:
+        directory = "data/genomes/ncbi_dataset",
+        max_workers = config.get("rehydrate", {}).get("max_workers", 10)
+    log:
+        "logs/rehydrate.log"
+    shell:
+        """
+        unzip -o {input.zipfile} -d {params.directory} >> {log} 2>&1
+        datasets rehydrate --no-progressbar \
+        --max-workers {params.max_workers} \
+        --directory {params.directory} >> {log} 2>&1
+        """
+
+rule cat_and_reformat_fastas:
+    """
+    Combine and reformat FASTA files from the rehydrated genomes.
+    """
+    input:
+        accessions = "data/genomes/accessions-filtered.tsv",
+        taxa_map = "data/genomes/accessions.tsv"
+    output:
+        fasta = "data/genomes/mtsv-genomes.fasta"
+    params:
+        directory = "data/genomes/ncbi_dataset/data",
+    log:
+        "logs/reformat_fastas.log"
+    script:
+        "scripts/reformat_fastas.py"
+
+checkpoint chunk_fasta_files:
+    """
+    Chunk FASTA files into smaller files for processing.
+    """
+    input:
+        fasta = "data/genomes/mtsv-genomes.fasta",
+    output:
+        directory("data/genomes/db/chunks")
+    params:
+        chunk_size = config.get("db", {}).get('chunk_size_gb', 10)
+    log:
+        "logs/chunk_fasta_files.log"
+    shell:
+        """
+        mtsv-chunk --input {input.fasta} \
+        --output {output} \
+        --chunk-size {params.chunk_size} > {log} 2>&1
+        """
+
+# Discover the number of chunks created by the chunk_fasta_files rule
+def get_chunks(wildcards):
+    checkpoint_output = checkpoints.chunk_fasta_files.get(**wildcards).output[0]
+    chunk_files = glob.glob(f"{checkpoint_output}/*.fasta")
+    return [f.replace(".fasta", "") for f in chunk_files]
+
+
+rule mtsv_build:
+    input:
+        fasta = "data/genomes/db/chunks/{chunk}.fasta"
+    output: "data/genomes/db/index/{chunk}.mtsv"
+    params:
+        sample_interval = config.get("db", {}).get("sample_interval", 64),
+        sa_sample = config.get("db", {}).get("sa_sample", 32),
+    log: "logs/mtsv_build_{chunk}.log"
+    shell:
+        """
+        mtsv-build --fasta {input.fasta} \
+        --index {output} \
+        --sample-interval {params.sample_interval} \
+        --sa-sample {params.sa_sample} > {log} 2>&1
+        """

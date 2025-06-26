@@ -1,0 +1,7 @@
+ncbi-datasets-cli
+snakemake
+python<3.12
+ete3
+biopython
+mtsv-tools
+pathlib
